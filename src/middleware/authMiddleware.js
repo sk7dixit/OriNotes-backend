@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const pool = require('../config/db');
 const generateToken = require('../utils/generateToken'); // adjust path if your util is elsewhere
 
-const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
+const JWT_SECRET = process.env.JWT_SECRET || 'smart_notes_secure_secret';
 const REFRESH_COOKIE_NAME = process.env.REFRESH_COOKIE_NAME || 'refreshToken';
 
 // Helper: find refresh token row by raw token
@@ -90,7 +90,7 @@ module.exports = async function authMiddleware(req, res, next) {
 
     const rtRow = await findRefreshTokenRowByRaw(rawRefresh);
     if (!rtRow) {
-      try { res.clearCookie(REFRESH_COOKIE_NAME); } catch (e) {}
+      try { res.clearCookie(REFRESH_COOKIE_NAME); } catch (e) { }
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
@@ -99,7 +99,7 @@ module.exports = async function authMiddleware(req, res, next) {
     }
 
     if (!rtRow.expires_at || new Date(rtRow.expires_at) < new Date()) {
-      try { res.clearCookie(REFRESH_COOKIE_NAME); } catch (e) {}
+      try { res.clearCookie(REFRESH_COOKIE_NAME); } catch (e) { }
       return res.status(401).json({ error: 'Refresh token expired' });
     }
 
@@ -123,10 +123,10 @@ module.exports = async function authMiddleware(req, res, next) {
       // NOTE: When generating new token here, ensure twoFactorPassed=true in payload
       // if 2FA is enabled, as they passed it initially to get the RT.
       const payload = {
-          id: req.user.id,
-          username: req.user.username,
-          role: req.user.role,
-          twoFactorPassed: req.user.is_two_factor_enabled ? true : false,
+        id: req.user.id,
+        username: req.user.username,
+        role: req.user.role,
+        twoFactorPassed: req.user.is_two_factor_enabled ? true : false,
       };
       const newAccessToken = generateToken(payload);
       res.locals.newAccessToken = newAccessToken;
@@ -136,7 +136,11 @@ module.exports = async function authMiddleware(req, res, next) {
 
     return next();
   } catch (err) {
+    const fs = require('fs');
+    try {
+      fs.appendFileSync('server_error.log', `[${new Date().toISOString()}] AuthMiddleware Error: ${err.stack}\n`);
+    } catch (e) { }
     console.error('authMiddleware error:', err);
-    return res.status(500).json({ error: 'Authentication failure' });
+    return res.status(500).json({ error: 'Authentication failure', details: err.message });
   }
 };

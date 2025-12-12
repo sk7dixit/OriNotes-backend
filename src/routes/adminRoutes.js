@@ -11,7 +11,12 @@ const {
     getAllNotes,
     deleteUser,
     getPendingNoteReports, // <-- NEW: Import Report fetcher
-    reviewNoteReport      // <-- NEW: Import Report reviewer
+    reviewNoteReport,      // <-- NEW: Import Report reviewer
+    getNotificationStats,  // <-- NEW: Import Notification Stats
+    searchGlobal,           // <-- NEW: Import Global Search
+    getUserDetails,         // <-- NEW: Import User Details
+    getFeedbackMessages,    // <-- NEW: Feedback
+    markFeedbackAsRead
 } = require('../controllers/adminController');
 const authMiddleware = require('../middleware/authMiddleware');
 const adminMiddleware = require('../middleware/adminMiddleware');
@@ -19,6 +24,7 @@ const adminMiddleware = require('../middleware/adminMiddleware');
 // --- Main Admin Routes ---
 router.get('/dashboard', authMiddleware, adminMiddleware, getDashboardData);
 router.get('/active-users', authMiddleware, adminMiddleware, getActiveUsers);
+router.get('/users/:id/details', authMiddleware, adminMiddleware, getUserDetails); // <-- NEW Route
 router.get('/user-submissions', authMiddleware, adminMiddleware, getUserSubmissions);
 router.get('/all-notes', authMiddleware, adminMiddleware, getAllNotes);
 
@@ -39,6 +45,17 @@ router.get('/settings', authMiddleware, adminMiddleware, getAppSettings);
 router.put('/settings', authMiddleware, adminMiddleware, updateAppSetting);
 
 // --- Admin Badge Route ---
+// --- Admin Badge Route ---
 router.get('/badges', authMiddleware, adminMiddleware, getBadgeData);
+
+// --- Notification Stats ---
+router.get('/notifications/stats', authMiddleware, adminMiddleware, getNotificationStats);
+
+// --- Global Search ---
+router.get('/search', authMiddleware, adminMiddleware, searchGlobal);
+
+// --- Feedback / Contact Messages ---
+router.get('/feedback', authMiddleware, adminMiddleware, getFeedbackMessages);
+router.put('/feedback/:id/read', authMiddleware, adminMiddleware, markFeedbackAsRead);
 
 module.exports = router;

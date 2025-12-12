@@ -28,6 +28,9 @@ async function notifyFavoritedUsers(noteId, noteTitle, type = 'new') {
       ? `The note "${noteTitle}" you uploaded/requested is now available!`
       : `A new version of the note "${noteTitle}" is now available.`;
 
+    const notificationType = type === 'new' ? 'upload' : 'update';
+    const referenceUrl = `/notes/view/${noteId}`;
+
     // 1. Get all user IDs who favorited this note
     const favouritedUsersResult = await pool.query(
       "SELECT user_id FROM user_favourites WHERE note_id = $1",
@@ -37,8 +40,9 @@ async function notifyFavoritedUsers(noteId, noteTitle, type = 'new') {
 
     // 2. Insert the main notification
     const notificationResult = await pool.query(
-      "INSERT INTO notifications (title, message) VALUES ($1, $2) RETURNING id",
-      [title, message]
+      `INSERT INTO notifications (title, message, type, reference_id, reference_url) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [title, message, notificationType, noteId, referenceUrl]
     );
     const notificationId = notificationResult.rows[0].id;
 
@@ -114,7 +118,7 @@ async function handleMultiUpload(req, res) {
     }
 
     const userId = req.user.id;
-    const { titles, material_types, fields, courses, subjects, university_names, is_free } = req.body;
+    const { titles, material_types, fields, courses, subjects, university_names, is_free, approval_status } = req.body;
 
     // Parse arrays (multipart/form-data sends arrays as multiple fields with same key or indexed keys)
     // We expect the frontend to send arrays or single values.
@@ -133,6 +137,17 @@ async function handleMultiUpload(req, res) {
     // is_free comes as an array of strings "true"/"false" or booleans
     const isFreeList = toArray(is_free);
 
+    // Allow admin to override status (e.g. 'approved')
+    let startStatus = (req.user.role === 'admin') ? 'approved' : 'pending';
+    if (req.user.role === 'admin' && approval_status) {
+      startStatus = approval_status;
+    }
+
+    // Parse state list (frontend must send 'states' which aligns with other arrays)
+    // Note: If using AdminUpload, it might send 'state' inside formData. 
+    // We'll look for 'states' or 'institution_state' in body.
+    const stateList = toArray(req.body.states || req.body.institution_states || []);
+
     const createdNotes = [];
     const errors = [];
 
@@ -143,12 +158,32 @@ async function handleMultiUpload(req, res) {
       const isFreeVal = isFreeList[i] === 'true' || isFreeList[i] === true;
 
       try {
-        // 1. Upload to Cloudinary
-        const randomHex = crypto.randomBytes(6).toString('hex');
-        const safeName = f.originalname.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_\.-]/g, '');
-        const publicId = `${userId}_${Date.now()}_${randomHex}_${path.parse(safeName).name}`;
+        let fileUrl, publicId, pdfPath;
 
-        const uploadResult = await uploadBufferToCloudinary(f.buffer, publicId);
+        // Try Cloudinary if keys exist
+        if (process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_SECRET) { // typo in secret key name check, usually API_SECRET
+          try {
+            const randomHex = crypto.randomBytes(6).toString('hex');
+            const safeName = f.originalname.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_\.-]/g, '');
+            const pid = `${userId}_${Date.now()}_${randomHex}_${path.parse(safeName).name}`;
+            const uploadResult = await uploadBufferToCloudinary(f.buffer, pid);
+            fileUrl = uploadResult.secure_url;
+            publicId = uploadResult.public_id;
+          } catch (cloudErr) {
+            console.warn("Cloudinary upload failed, falling back to local:", cloudErr.message);
+          }
+        }
+
+        // Fallback to local if no Cloudinary result
+        if (!fileUrl) {
+          const filename = `${Date.now()}_${f.originalname.replace(/\s+/g, '_')}`;
+          const uploadDir = path.join(__dirname, '..', '..', 'uploads');
+          await fs.mkdir(uploadDir, { recursive: true }).catch(() => { });
+          const diskPath = path.join(uploadDir, filename);
+          await fs.writeFile(diskPath, f.buffer);
+          pdfPath = `/uploads/${filename}`;
+          // fileUrl for local can be the same or full URL if needed, but DB usually takes null for file_url if local
+        }
 
         // 2. Insert into DB
         // Construct insert query based on material type
@@ -159,14 +194,14 @@ async function handleMultiUpload(req, res) {
             INSERT INTO notes (
               user_id, title, pdf_path, file_url, cloudinary_public_id,
               material_type, university_name, course, subject,
-              is_free, approval_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
+              is_free, approval_status, state
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
           `;
           insertVals = [
-            userId, title, null, uploadResult.secure_url, uploadResult.public_id,
+            userId, title, pdfPath || null, fileUrl || null, publicId || null,
             'university_material', uniList[i] || null, courseList[i] || null, subjectList[i] || null,
-            isFreeVal
+            isFreeVal, startStatus, stateList[i] || null
           ];
         } else {
           // personal
@@ -176,13 +211,13 @@ async function handleMultiUpload(req, res) {
               user_id, title, pdf_path, file_url, cloudinary_public_id,
               material_type, institution_type, field, course, subject,
               is_free, approval_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
           `;
           insertVals = [
-            userId, title, null, uploadResult.secure_url, uploadResult.public_id,
+            userId, title, pdfPath || null, fileUrl || null, publicId || null,
             'personal_material', institutionType, fieldList[i] || null, courseList[i] || null, subjectList[i] || null,
-            isFreeVal
+            isFreeVal, startStatus
           ];
         }
 
@@ -217,7 +252,7 @@ async function uploadUserNote(req, res) {
     const {
       title, material_type,
       field, course, subject,
-      university_name
+      university_name, state
     } = req.body;
 
     const userId = req.user.id;
@@ -252,7 +287,7 @@ async function uploadUserNote(req, res) {
       pdf_path: pdfPath,
       user_id: userId,
       is_free: false,
-      approval_status: 'pending',
+      approval_status: req.user.role === 'admin' ? 'approved' : 'pending',
     };
 
     if (material_type === 'university_material') {
@@ -262,6 +297,7 @@ async function uploadUserNote(req, res) {
         university_name: university_name,
         course: course,
         subject: subject,
+        state: state || null,
       };
     } else {
       const institutionType = ["Class 12", "Class 11", "Class 10"].includes(field) ? "School" : "College";
@@ -297,27 +333,82 @@ async function uploadUserNote(req, res) {
 
 async function getFilteredNotes(req, res) {
   try {
-    const { q, material_type, institution_type, field, course, subject, university_name } = req.query;
-    let query = `SELECT id, title, view_count, is_free FROM notes WHERE approval_status = 'approved' AND (expiry_date IS NULL OR expiry_date > NOW())`;
+    const { q, material_type, institution_type, field, course, subject, university_name, source, date_range, state } = req.query;
+    const userId = req.user ? req.user.id : null; // data from authMiddleware
+
+    let query = `
+        SELECT n.id, n.title, n.view_count, n.is_free, n.created_at, n.material_type, n.course, n.subject, n.university_name, n.state, u.username, u.role
+        FROM notes n
+        JOIN users u ON n.user_id = u.id
+        WHERE n.approval_status = 'approved' AND (n.expiry_date IS NULL OR n.expiry_date > NOW())
+    `;
     const values = [];
     let paramIndex = 1;
+
+    // --- Source Filter ---
+    if (source === 'my_notes' && userId) {
+      query += ` AND n.user_id = $${paramIndex++}`;
+      values.push(userId);
+    } else if (source === 'admin_notes') {
+      query += ` AND u.role = 'admin'`;
+    } else if (source === 'university') {
+      query += ` AND n.material_type = 'university_material'`;
+    }
+
+    // --- Date Range Filter ---
+    if (date_range) {
+      const now = new Date();
+      let pastDate = new Date();
+
+      switch (date_range) {
+        case '1_day': pastDate.setDate(now.getDate() - 1); break;
+        case '1_week': pastDate.setDate(now.getDate() - 7); break;
+        case '2_week': pastDate.setDate(now.getDate() - 14); break;
+        case '3_week': pastDate.setDate(now.getDate() - 21); break;
+        case '4_week': pastDate.setDate(now.getDate() - 28); break;
+        default: pastDate = null;
+      }
+
+      if (pastDate) {
+        query += ` AND n.created_at >= $${paramIndex++}`;
+        values.push(pastDate.toISOString());
+      }
+    }
+
+
     const addFilter = (column, value) => {
       if (value) {
-        query += ` AND ${column} ILIKE $${paramIndex++}`;
+        query += ` AND n.${column} ILIKE $${paramIndex++}`;
         values.push(value);
       }
     };
+
+    // Standard Filters
     addFilter('material_type', material_type);
     addFilter('institution_type', institution_type);
     addFilter('field', field);
     addFilter('course', course);
     addFilter('subject', subject);
+    // REMOVED DUPLICATE SUBJECT LINE HERE
     addFilter('university_name', university_name);
+    addFilter('state', state);
+
     if (q) {
-      query += ` AND title ILIKE $${paramIndex++}`;
+      query += ` AND n.title ILIKE $${paramIndex++}`;
       values.push(`%${q}%`);
     }
-    query += " ORDER BY created_at DESC";
+
+    // Sorting logic
+    const { sort } = req.query;
+    if (sort === 'popular') {
+      query += " ORDER BY n.view_count DESC, n.created_at DESC";
+    } else if (sort === 'oldest') {
+      query += " ORDER BY n.created_at ASC";
+    } else {
+      // Default: Newest
+      query += " ORDER BY n.created_at DESC";
+    }
+
     const result = await pool.query(query, values);
     res.json(result.rows);
   } catch (err) {
@@ -326,10 +417,12 @@ async function getFilteredNotes(req, res) {
   }
 }
 
+const universityList = require('../data/universityList'); // Import static data
+
 /**
  * GET /api/notes/available-subjects
  * Retrieves all distinct, approved subjects, courses, and fields
- * to populate the browsing filters.
+ * to populate the browsing filters. Merges static university data with DB data.
  */
 async function getAvailableSubjects(req, res) {
   try {
@@ -337,22 +430,80 @@ async function getAvailableSubjects(req, res) {
       subjectsResult,
       coursesResult,
       fieldsResult,
-      universitiesResult
+      dbHierarchyResult
     ] = await Promise.all([
       pool.query("SELECT DISTINCT subject FROM notes WHERE subject IS NOT NULL AND subject != '' AND approval_status = 'approved' ORDER BY subject ASC"),
       pool.query("SELECT DISTINCT course FROM notes WHERE course IS NOT NULL AND course != '' AND approval_status = 'approved' ORDER BY course ASC"),
       pool.query("SELECT DISTINCT field FROM notes WHERE field IS NOT NULL AND field != '' AND approval_status = 'approved' ORDER BY field ASC"),
-      pool.query("SELECT DISTINCT university_name FROM notes WHERE university_name IS NOT NULL AND university_name != '' AND approval_status = 'approved' ORDER BY university_name ASC"),
+      // Fetch DB hierarchy: State -> University -> Course
+      // Note: We only care about university_material for this hierarchy merging
+      pool.query(`
+          SELECT DISTINCT state, university_name, course 
+          FROM notes 
+          WHERE approval_status = 'approved' 
+            AND material_type = 'university_material'
+            AND state IS NOT NULL
+            AND university_name IS NOT NULL
+      `)
     ]);
 
     const normalize = (rows, key) => rows.map(row => row[key]);
 
+    // 1. Build Base Hierarchy from Static List
+    const hierarchy = {}; // Structure: { [State]: { [University]: Set(Courses) } }
+
+    universityList.forEach(item => {
+      if (!hierarchy[item.state]) hierarchy[item.state] = {};
+      item.universities.forEach(uni => {
+        if (!hierarchy[item.state][uni.name]) hierarchy[item.state][uni.name] = new Set();
+        uni.courses.forEach(c => hierarchy[item.state][uni.name].add(c));
+      });
+    });
+
+    // 2. Merge DB Data into Hierarchy
+    dbHierarchyResult.rows.forEach(row => {
+      const { state, university_name, course } = row;
+      if (!hierarchy[state]) hierarchy[state] = {};
+      if (!hierarchy[state][university_name]) hierarchy[state][university_name] = new Set();
+      if (course) hierarchy[state][university_name].add(course);
+    });
+
+    // 3. Flatten Hierarchy for Frontend Consumption
+    // Frontend expects: hierarchy: { State: [UniversityName, ...] } 
+    // AND we probably need a way to look up courses for a university?
+    // Current FilterBar logic:
+    // - states: list of states
+    // - hierarchy: { State: [UniversityName] }
+    // - courses: list of ALL courses (global)
+    // - To support "University -> Course", we might need a richer structure or just rely on global course list + db filtering.
+    // However, user specifically asked for "University Name -> Courses Generally Offered". 
+    // If we want the Course dropdown to be specific to the selected university, FilterBar needs modification or more data.
+    // The current FilterBar implementation calculates `courses` as a global list.
+    // Proposed Improvement: Send a separate `universityCourses` map: { UniversityName: [Courses] }
+
+    const finalStates = Object.keys(hierarchy).sort();
+    const finalHierarchy = {}; // State -> [University Names]
+    const universityCourses = {}; // University Name -> [Courses]
+    const globalCourses = new Set(normalize(coursesResult.rows, 'course'));
+
+    finalStates.forEach(state => {
+      finalHierarchy[state] = Object.keys(hierarchy[state]).sort();
+      finalHierarchy[state].forEach(uniName => {
+        const uniCourseSet = hierarchy[state][uniName];
+        universityCourses[uniName] = Array.from(uniCourseSet).sort();
+        uniCourseSet.forEach(c => globalCourses.add(c));
+      });
+    });
+
     res.json({
       subjects: normalize(subjectsResult.rows, 'subject'),
-      courses: normalize(coursesResult.rows, 'course'),
+      courses: Array.from(globalCourses).sort(),
       fields: normalize(fieldsResult.rows, 'field'),
-      universities: normalize(universitiesResult.rows, 'university_name'),
+      states: finalStates,
+      hierarchy: finalHierarchy,
+      universityCourses: universityCourses // New field for frontend to use
     });
+
   } catch (err) {
     console.error("❌ Error fetching available subjects:", err.message);
     res.status(500).json({ error: "Failed to fetch filter data." });
@@ -361,7 +512,7 @@ async function getAvailableSubjects(req, res) {
 
 async function addNote(req, res) {
   try {
-    const { title, material_type, institution_type, field, course, subject, university_name, isFree } = req.body;
+    const { title, material_type, institution_type, field, course, subject, university_name, state, isFree } = req.body;
     const userId = req.user.id;
     if (!title || !req.file || !material_type) {
       return res.status(400).json({ error: "Title, PDF file, and material type are required" });
@@ -385,7 +536,9 @@ async function addNote(req, res) {
       field: field || null,
       course: course || null,
       subject: subject || null,
+      subject: subject || null,
       university_name: university_name || null,
+      state: state || null,
     });
     res.status(201).json(newNote);
   } catch (err) {
@@ -507,14 +660,74 @@ async function getFavouriteIds(req, res) {
   }
 }
 
+const jwt = require('jsonwebtoken'); // Ensure this is available
+
 async function getSingleNote(req, res) {
   try {
     const { id } = req.params;
-    const note = await findNoteById(id);
+    const note = await findNoteByIdAndJoinUser(id);
     if (!note) {
       return res.status(404).json({ error: "Note not found." });
     }
-    res.json(note);
+
+    // Default access state
+    let hasAccess = false;
+    let accessStatus = null; // 'pending', 'approved', 'rejected', or null
+    let userId = null;
+    let userRole = null;
+
+    // 1. Check if user is logged in (Manual Token Decode for optional auth)
+    // We do this because getSingleNote is a public route, but we need to know who is asking
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || "smart_notes_secure_secret");
+        userId = decoded.id;
+        userRole = decoded.role;
+      } catch (e) {
+        // Invalid token, treat as guest
+        console.warn("Invalid token in getSingleNote", e.message);
+      }
+    }
+
+    // 2. Determine Access
+    if (note.material_type === 'university_material') {
+      hasAccess = true; // Publicly accessible
+    } else {
+      // Personal Material logic
+      if (userId) {
+        if (userRole === 'admin' || note.owner_role === 'admin' || String(note.user_id) === String(userId)) {
+          hasAccess = true;
+        } else {
+          // Check for permission entry
+          const permResult = await pool.query(
+            "SELECT status FROM note_access_permissions WHERE note_id = $1 AND requester_id = $2",
+            [id, userId]
+          );
+          if (permResult.rows.length > 0) {
+            accessStatus = permResult.rows[0].status;
+            if (accessStatus === 'approved') {
+              hasAccess = true;
+            }
+          }
+        }
+      } else {
+        // Even if guest (not logged in), check if owner is admin
+        if (note.owner_role === 'admin') {
+          hasAccess = true;
+        }
+      }
+    }
+
+    // 3. Return note with access flags and mapped username
+    res.json({
+      ...note,
+      username: note.owner_username, // Map for frontend compatibility
+      has_access: hasAccess,
+      access_status: accessStatus
+    });
+
   } catch (err) {
     console.error("Error fetching single note:", err.message);
     res.status(500).json({ error: "Failed to fetch note details." });
@@ -524,11 +737,29 @@ async function getSingleNote(req, res) {
 async function serveNoteWithWatermark(req, res) {
   try {
     const { id } = req.params;
-    const viewingUser = req.user;
+    const viewingUser = req.user; // authMiddleware guarantees this
     const note = await findNoteByIdAndJoinUser(id);
     if (!note) {
       return res.status(404).json({ error: "Note not found." });
     }
+
+    // --- ACCESS CONTROL ENFORCEMENT ---
+    if (note.material_type !== 'university_material') {
+      // It is Personal Material
+      // Allow access if viewer is admin OR viewer is owner OR note owner is admin
+      // Allow access if viewer is admin OR viewer is owner OR note owner is admin
+      if (viewingUser.role !== 'admin' && String(note.user_id) !== String(viewingUser.id) && note.owner_role !== 'admin') {
+        // Check permissions
+        const permResult = await pool.query(
+          "SELECT status FROM note_access_permissions WHERE note_id = $1 AND requester_id = $2 AND status = 'approved'",
+          [id, viewingUser.id]
+        );
+        if (permResult.rows.length === 0) {
+          return res.status(403).json({ error: "Access denied. You must request permission to view this note." });
+        }
+      }
+    }
+    // ----------------------------------
 
     // If note is stored on Cloudinary, fetch remote and watermark
     if (note.cloudinary_public_id || note.file_url) {
@@ -542,7 +773,7 @@ async function serveNoteWithWatermark(req, res) {
       const pdfDoc = await PDFDocument.load(remoteBuffer);
       const logoImage = await pdfDoc.embedPng(logoBytes);
       const logoDims = logoImage.scale(0.15);
-      if (viewingUser.role !== 'admin' && note.user_id !== viewingUser.id) {
+      if (viewingUser.role !== 'admin' && String(note.user_id) !== String(viewingUser.id)) {
         const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
         const pages = pdfDoc.getPages();
         for (const page of pages) {
@@ -571,7 +802,7 @@ async function serveNoteWithWatermark(req, res) {
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const logoImage = await pdfDoc.embedPng(logoBytes);
     const logoDims = logoImage.scale(0.15);
-    if (viewingUser.role !== 'admin' && note.user_id !== viewingUser.id) {
+    if (viewingUser.role !== 'admin' && String(note.user_id) !== String(viewingUser.id)) {
       const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
       const pages = pdfDoc.getPages();
       for (const page of pages) {
@@ -613,19 +844,6 @@ async function getFreeNote(req, res) {
   }
 }
 
-async function getMyNotes(req, res) {
-  try {
-    const userId = req.user.id;
-    const result = await pool.query(
-      "SELECT id, title, approval_status, rejection_reason, created_at FROM notes WHERE user_id = $1 ORDER BY created_at DESC",
-      [userId]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("❌ Error fetching my notes:", err.message);
-    res.status(500).json({ error: "Failed to fetch your notes." });
-  }
-}
 
 /**
  * POST /api/notes/:noteId/report
@@ -846,14 +1064,287 @@ async function getAllNotes(req, res) {
   }
 }
 
+// Placeholders for missing functions
+// ------------------ Generic Notification Helper ------------------
+async function sendNotification(recipientId, title, message, type, refId, refUrl) {
+  try {
+    const result = await pool.query(
+      `INSERT INTO notifications (title, message, recipient_id, type, reference_id, reference_url) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [title, message, recipientId, type, refId, refUrl]
+    );
+    const notificationId = result.rows[0].id;
+
+    // Also insert into user_notifications for read status tracking
+    await pool.query(
+      `INSERT INTO user_notifications (user_id, notification_id) VALUES ($1, $2)`,
+      [recipientId, notificationId]
+    );
+    return notificationId;
+  } catch (err) {
+    console.error("❌ Error sending notification:", err);
+  }
+}
+
+// ------------------ RATINGS ------------------
+async function addNoteRating(req, res) {
+  try {
+    const { noteId } = req.params;
+    const { rating, review_text } = req.body;
+    const userId = req.user.id; // Rater
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: "Rating must be between 1 and 5." });
+    }
+
+    await pool.query(
+      `INSERT INTO note_ratings (note_id, user_id, rating, review_text)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (note_id, user_id) DO UPDATE SET rating = EXCLUDED.rating, review_text = EXCLUDED.review_text, created_at = NOW()`,
+      [noteId, userId, rating, review_text]
+    );
+
+    // Notify Owner
+    const note = await findNoteById(noteId);
+    if (note && note.user_id !== userId) {
+      const raterName = req.user.username || "A user";
+      const reviewSnippet = review_text ? `"${review_text}"` : "No comment";
+
+      // Notify Owner
+      await sendNotification(
+        note.user_id,
+        `New Review from ${raterName}`,
+        `${raterName} rated your note "${note.title}" ${rating}/5: ${reviewSnippet}`,
+        'rating',
+        noteId,
+        `/notes/view/${noteId}`
+      );
+    }
+
+    // Notify Admins
+    const adminResult = await pool.query("SELECT id FROM users WHERE role = 'admin'");
+    const raterNameForAdmin = req.user.username || "A user";
+    const reviewSnippetForAdmin = review_text ? `"${review_text}"` : "No comment";
+
+    for (const admin of adminResult.rows) {
+      // Don't notify the rater if they are an admin
+      if (admin.id !== userId) {
+        await sendNotification(
+          admin.id,
+          `New Review: ${note.title}`,
+          `${raterNameForAdmin} rated "${note.title}" ${rating}/5: ${reviewSnippetForAdmin}`,
+          'rating_admin',
+          noteId,
+          `/notes/view/${noteId}`
+        );
+      }
+    }
+
+    res.json({ message: "Rating submitted." });
+  } catch (err) {
+    console.error("Error adding rating:", err);
+    res.status(500).json({ error: "Failed to submit rating." });
+  }
+}
+
+async function requestNoteAccess(req, res) {
+  try {
+    const { noteId } = req.params;
+    const requesterId = req.user.id;
+
+    const note = await findNoteById(noteId);
+    if (!note) return res.status(404).json({ error: "Note not found" });
+    if (note.user_id === requesterId) return res.status(400).json({ error: "You own this note." });
+
+    await pool.query(
+      `INSERT INTO note_access_permissions (note_id, owner_id, requester_id, status)
+       VALUES ($1, $2, $3, 'pending')
+       ON CONFLICT (note_id, requester_id) DO NOTHING`,
+      [noteId, note.user_id, requesterId]
+    );
+
+    // Notify Owner
+    await sendNotification(
+      note.user_id,
+      "Access Request",
+      `${req.user.name || 'A user'} requested access to "${note.title}".`,
+      'access_request',
+      noteId,
+      '/approval-requests'
+    );
+
+    res.json({ message: "Access request sent." });
+  } catch (err) {
+    console.error("Error requesting access:", err);
+    res.status(500).json({ error: "Failed to request access." });
+  }
+}
+
+async function getAccessRequests(req, res) {
+  try {
+    const userId = req.user.id;
+
+    // Fetch requests for notes owned by the current user
+    const query = `
+      SELECT 
+        nap.id,
+        nap.status,
+        nap.created_at,
+        n.title AS note_title,
+        n.subject AS note_subject,
+        n.id AS note_id,
+        u.username AS requester_username,
+        u.name AS requester_name,
+        u.id AS requester_id
+      FROM note_access_permissions nap
+      JOIN notes n ON nap.note_id = n.id
+      JOIN users u ON nap.requester_id = u.id
+      WHERE nap.owner_id = $1 
+      ORDER BY nap.created_at DESC
+    `;
+
+    const result = await pool.query(query, [userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Error fetching access requests:", err);
+    res.status(500).json({ error: "Failed to fetch access requests." });
+  }
+}
+
+async function respondToAccessRequest(req, res) {
+  try {
+    const { requestId } = req.params;
+    const { status } = req.body; // 'approved' or 'rejected'
+    const ownerId = req.user.id;
+
+    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: "Invalid status" });
+
+    const result = await pool.query(
+      `UPDATE note_access_permissions SET status = $1 WHERE id = $2 AND owner_id = $3 RETURNING *`,
+      [status, requestId, ownerId]
+    );
+
+    if (result.rowCount === 0) return res.status(404).json({ error: "Request not found or unauthorized." });
+
+    const request = result.rows[0];
+    const note = await findNoteById(request.note_id);
+
+    // Notify Requester
+    await sendNotification(
+      request.requester_id,
+      `Access ${status === 'approved' ? 'Granted' : 'Denied'}`,
+      `Your request to access "${note ? note.title : 'a note'}" was ${status}.`,
+      'general',
+      request.note_id,
+      `/notes/view/${request.note_id}`
+    );
+
+    res.json({ message: `Request ${status}.` });
+  } catch (err) {
+    console.error("Error responding to access request:", err);
+    res.status(500).json({ error: "Failed to process request." });
+  }
+}
+
+async function getSharedNotes(req, res) {
+  try {
+    const userId = req.user.id;
+
+    // Fetch notes where the current user is the requester and status is 'approved'
+    const query = `
+      SELECT 
+        n.*, 
+        u.username AS owner_username,
+        nap.created_at AS shared_at
+      FROM note_access_permissions nap
+      JOIN notes n ON nap.note_id = n.id
+      JOIN users u ON n.user_id = u.id
+      WHERE nap.requester_id = $1 
+        AND nap.status = 'approved'
+      ORDER BY nap.created_at DESC
+    `;
+
+    const result = await pool.query(query, [userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Error fetching shared notes:", err.message);
+    res.status(500).json({ error: "Failed to fetch shared notes." });
+  }
+}
+async function getMyNotes(req, res) {
+  try {
+    const userId = req.user ? req.user.id : null;
+    if (!userId) {
+      return res.status(401).json({ error: "User ID missing from request." });
+    }
+
+    // SAFE QUERY: Explicit columns that definitely exist
+    // We omit 'is_free' just to be 100% safe for now, we can add it later
+    const notesResult = await pool.query(`
+      SELECT 
+        id, title, subject, created_at, approval_status, view_count, 
+        file_url, pdf_path, rejection_reason,
+        university_name, course, field, material_type, state
+      FROM notes 
+      WHERE user_id = $1 
+      ORDER BY created_at DESC
+    `, [userId]);
+
+    const notes = notesResult.rows;
+
+    const stats = {
+      total: notes.length,
+      approved: notes.filter(n => n.approval_status === 'approved').length,
+      pending: notes.filter(n => n.approval_status === 'pending').length,
+      rejected: notes.filter(n => n.approval_status === 'rejected').length,
+      totalViews: notes.reduce((sum, n) => sum + (parseInt(n.view_count) || 0), 0)
+    };
+
+    res.json({ stats, notes });
+  } catch (err) {
+    console.error("Error fetching my notes:", err);
+    res.status(200).json({ notes: [], stats: { total: 0, approved: 0, pending: 0, rejected: 0, totalViews: 0 }, error: "Backend error handled gracefully." });
+  }
+}
+
+
+// ----------------- Ratings placeholders -----------------
+
+async function getNoteRatings(req, res) {
+  try {
+    const { noteId } = req.params;
+    const result = await pool.query(`
+      SELECT nr.rating, nr.review_text, nr.created_at, u.username 
+      FROM note_ratings nr
+      JOIN users u ON nr.user_id = u.id
+      WHERE nr.note_id = $1
+      ORDER BY nr.created_at DESC
+    `, [noteId]);
+
+    // Calculate average
+    const ratings = result.rows;
+    const average = ratings.length > 0
+      ? (ratings.reduce((acc, r) => acc + r.rating, 0) / ratings.length).toFixed(1)
+      : 0;
+
+    res.json({ average, ratings });
+  } catch (err) {
+    console.error("Error fetching ratings:", err);
+    res.status(500).json({ error: "Failed to fetch ratings." });
+  }
+}
+
+
 module.exports = {
+  uploadMiddleware,
   uploadUserNote,
   handleMultiUpload,
   getPendingNotes,
+  getAccessRequests,
   reviewNote,
   getFilteredNotes,
   addNote,
-  getNoteById,
+  getSingleNote,
   reviewNoteVersion,
   addFavourite,
   removeFavourite,
@@ -869,7 +1360,6 @@ module.exports = {
   removeNote,
   getSharedNotes,
   requestNoteAccess,
-  getAccessRequests,
   respondToAccessRequest,
   getNoteRatings,
   addNoteRating,

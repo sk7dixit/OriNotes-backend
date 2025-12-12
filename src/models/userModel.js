@@ -141,7 +141,12 @@ async function updateUserProfile(userId, fields) {
     schoolCollege: "school_college",
     bio: "bio",
     username: "username", // Allow username updates (optional)
-    avatarUrl: "avatar_url" // Cloudinary profile image
+    avatarUrl: "avatar_url", // Cloudinary profile image
+    social_links: "social_links",
+    gender: "gender",
+    branch: "branch",
+    semester: "semester",
+    skills: "skills"
   };
 
   // Build dynamic SQL

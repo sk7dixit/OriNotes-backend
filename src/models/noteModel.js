@@ -43,11 +43,11 @@ async function findNoteById(id) {
 }
 
 async function findNoteByIdAndJoinUser(id) {
-    const result = await pool.query(
-        "SELECT n.*, u.username as owner_username, u.email as owner_email FROM notes n JOIN users u ON n.user_id = u.id WHERE n.id = $1",
-        [id]
-    );
-    return result.rows[0];
+  const result = await pool.query(
+    "SELECT n.*, u.username as owner_username, u.email as owner_email, u.role as owner_role FROM notes n JOIN users u ON n.user_id = u.id WHERE n.id = $1",
+    [id]
+  );
+  return result.rows[0];
 }
 
 async function updateNote(noteId, fields) {

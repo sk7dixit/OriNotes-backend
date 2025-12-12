@@ -43,7 +43,17 @@ const createUserPayload = (user, isSubscriptionEnabled) => {
     role: user.role,
     subscription_expiry: user.subscription_expiry,
     free_views: user.free_views,
+    free_views: user.free_views,
+    created_at: user.created_at, // Added for 'Joined Date'
+    skills: user.skills, // Ensure skills are passed
     is_subscription_enabled: isSubscriptionEnabled,
+    // Profile Fields
+    bio: user.bio,
+    school_college: user.school_college,
+    branch: user.branch,
+    semester: user.semester,
+    gender: user.gender,
+    social_links: user.social_links
   };
 };
 
@@ -120,6 +130,17 @@ async function loginUser(req, res) {
     if (!user) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
+
+    // CHECK MAINTENANCE MODE
+    const maintenanceResult = await pool.query(
+      "SELECT setting_value FROM app_settings WHERE setting_key = 'maintenance_mode'"
+    );
+    const maintenanceMode = maintenanceResult.rows[0]?.setting_value === 'true';
+
+    if (maintenanceMode && user.role !== 'admin') {
+      return res.status(503).json({ error: "Site is under maintenance. Please try again later." });
+    }
+
     if (!user.is_verified) {
       return res.status(403).json({ error: "Please verify your email to log in." });
     }
@@ -155,33 +176,37 @@ async function loginUser(req, res) {
     const freshUser = await findUserById(user.id);
 
     // Generate access token (short-lived)
+    // Generate access token (short-lived)
     const accessToken = generateToken(freshUser);
 
-    // If rememberMe true, create refresh token and set httpOnly cookie
+    // Create refresh token for EVERY login (so session persists while browser is open)
+    const { rawToken } = await _createRefreshTokenForUser(user.id, req);
+
+    // Cookie options:
+    // - If rememberMe: persistent cookie (maxAge set)
+    // - If !rememberMe: session cookie (no maxAge, clears on browser close)
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    };
+
     if (rememberMe) {
-      const { rawToken, hashedToken, expiresAt } = await _createRefreshTokenForUser(user.id, req);
-      // store cookie (10 days)
-      const cookieOptions = {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        maxAge: REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000,
-      };
-      res.cookie("refreshToken", rawToken, cookieOptions);
-      // Optionally send login notification
+      cookieOptions.maxAge = REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000;
+    }
+
+    res.cookie("refreshToken", rawToken, cookieOptions);
+
+    // Optionally send login notification
+    if (rememberMe) {
       sendLoginNotification(user.email, { ip: req.ip, agent: req.get("User-Agent") }).catch(() => { });
-      return res.json({
-        message: "Login successful",
-        user: createUserPayload(freshUser, isSubscriptionEnabled),
-        token: accessToken,
-        remember: true,
-      });
     }
 
     return res.json({
       message: "Login successful",
       user: createUserPayload(freshUser, isSubscriptionEnabled),
       token: accessToken,
+      remember: !!rememberMe,
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -603,19 +628,131 @@ async function getPublicProfile(req, res) {
 async function getUserStats(req, res) {
   try {
     const userId = req.user.id;
-    const [uploadsResult, viewsResult] = await Promise.all([
+
+    // 1. Overview Counts
+    const [uploadsResult, viewsResult, favouritesResult, allUploadsCount, readsResult] = await Promise.all([
       pool.query("SELECT approval_status, COUNT(*) as count FROM notes WHERE user_id = $1 GROUP BY approval_status", [userId]),
-      pool.query("SELECT COALESCE(SUM(view_count), 0) as total_views FROM notes WHERE user_id = $1 AND approval_status = 'approved'", [userId])
+      pool.query("SELECT COALESCE(SUM(view_count), 0) as total_views FROM notes WHERE user_id = $1 AND approval_status = 'approved'", [userId]),
+      pool.query("SELECT COUNT(*) FROM user_favourites WHERE user_id = $1", [userId]),
+      pool.query("SELECT COUNT(*) FROM notes WHERE user_id = $1", [userId]),
+      // Reads: Distinct notes viewed by this user
+      pool.query("SELECT COUNT(DISTINCT note_id) as count FROM user_views WHERE user_id = $1", [userId])
     ]);
-    const stats = { approved: 0, pending: 0, rejected: 0, total_views: parseInt(viewsResult.rows[0].total_views) || 0 };
+
+    const overview = { approved: 0, pending: 0, rejected: 0, total_views: parseInt(viewsResult.rows[0].total_views) || 0 };
     uploadsResult.rows.forEach(row => {
-      if (stats.hasOwnProperty(row.approval_status)) {
-        stats[row.approval_status] = parseInt(row.count);
+      if (overview.hasOwnProperty(row.approval_status)) {
+        overview[row.approval_status] = parseInt(row.count);
       }
     });
-    res.json(stats);
+
+    // 2. Top Performing Notes (Top 5 by views) - USER SPECIFIC
+    const topNotesResult = await pool.query(`
+      SELECT id, title, view_count, approval_status, created_at, subject, university_name
+      FROM notes 
+      WHERE user_id = $1 AND approval_status = 'approved'
+      ORDER BY view_count DESC 
+      LIMIT 4
+    `, [userId]);
+
+    // 2.5 Recommended Notes (Global Top 3)
+    const globalTopNotesResult = await pool.query(`
+      SELECT n.id, n.title, n.view_count, n.subject, n.university_name, u.username as author_name
+      FROM notes n
+      JOIN users u ON n.user_id = u.id
+      WHERE n.approval_status = 'approved'
+      ORDER BY n.view_count DESC
+      LIMIT 3
+    `);
+
+    // 3. Activity / Contribution Data (Notes uploaded per day in last 30 days)
+    const activityResult = await pool.query(`
+      SELECT DATE(created_at) as date, COUNT(*) as count 
+      FROM notes 
+      WHERE user_id = $1 AND created_at > NOW() - INTERVAL '30 days'
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `, [userId]);
+
+    // 4. Calculate Streak
+    // Fetch all unique creation dates for this user's uploads
+    const datesResult = await pool.query(`
+        SELECT DISTINCT DATE(created_at) as date
+        FROM notes
+        WHERE user_id = $1
+        ORDER BY date DESC
+    `, [userId]);
+
+    let streak = 0;
+    if (datesResult.rows.length > 0) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const uploadDates = datesResult.rows.map(r => new Date(r.date));
+
+      // check if last upload was today or yesterday to start the streak
+      const lastUpload = uploadDates[0];
+      lastUpload.setHours(0, 0, 0, 0);
+
+      if (lastUpload.getTime() === today.getTime() || lastUpload.getTime() === yesterday.getTime()) {
+        streak = 1;
+        let currentDate = lastUpload;
+
+        for (let i = 1; i < uploadDates.length; i++) {
+          const prevDate = new Date(currentDate);
+          prevDate.setDate(prevDate.getDate() - 1); // Expected previous day
+
+          const thisDate = uploadDates[i];
+          thisDate.setHours(0, 0, 0, 0);
+
+          if (thisDate.getTime() === prevDate.getTime()) {
+            streak++;
+            currentDate = thisDate;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    // 5. Highlights: Best Month & Most Viewed
+    const bestMonthResult = await pool.query(`
+        SELECT TO_CHAR(created_at, 'Month YYYY') as month, COUNT(*) as count 
+        FROM notes 
+        WHERE user_id = $1 
+        GROUP BY month 
+        ORDER BY count DESC 
+        LIMIT 1
+    `, [userId]);
+
+    const bestMonth = bestMonthResult.rows[0] || { month: 'No uploads yet', count: 0 };
+    const mostViewed = topNotesResult.rows[0] || { title: 'No approved notes', view_count: 0 };
+
+    res.json({
+      overview,
+      topNotes: topNotesResult.rows,
+      recommendedNotes: globalTopNotesResult.rows,
+      activity: activityResult.rows,
+      realStats: {
+        totalUploads: parseInt(allUploadsCount.rows[0].count) || 0,
+        favouritesCount: parseInt(favouritesResult.rows[0].count) || 0,
+        totalViewsReceived: parseInt(viewsResult.rows[0].total_views) || 0,
+        readsCount: parseInt(readsResult.rows[0].count) || 0,
+        streak: streak
+      },
+      highlightStats: {
+        bestMonth: bestMonth.month.trim(),
+        bestMonthCount: parseInt(bestMonth.count),
+        mostViewedNoteTitle: mostViewed.title,
+        mostViewedNoteViews: parseInt(mostViewed.view_count)
+      }
+    });
+
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch user stats." });
+    console.error("Get User Stats error:", err);
+    res.status(500).json({ error: "Failed to fetch user stats" });
   }
 }
 
@@ -653,7 +790,16 @@ async function getProfile(req, res) {
     if (!user) {
       return res.status(404).json({ error: "User not found." });
     }
-    res.json(user);
+    const settingsResult = await pool.query(
+      "SELECT setting_value FROM app_settings WHERE setting_key = 'is_subscription_enabled'"
+    );
+    const rawValue = settingsResult.rows[0]?.setting_value;
+    const isSubscriptionEnabled = rawValue === 'true' || rawValue === true;
+
+    console.log(`DEBUG: getProfile - user: ${user.email}, rawSetting: ${rawValue} (${typeof rawValue}), isEnabled: ${isSubscriptionEnabled} `);
+
+    // Return the enriched payload just like login
+    res.json(createUserPayload(user, isSubscriptionEnabled));
   } catch (err) {
     console.error("Error fetching profile:", err);
     res.status(500).json({ error: "Failed to get profile" });
@@ -680,8 +826,8 @@ async function sendForgotPasswordOtp(req, res) {
 
     // 3. Save OTP to DB (Insert or Update existing)
     await pool.query(
-      `INSERT INTO otps (email, otp, created_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (email) DO UPDATE SET otp = $2, created_at = NOW()`,
+      `INSERT INTO otps(email, otp, created_at) VALUES($1, $2, NOW())
+       ON CONFLICT(email) DO UPDATE SET otp = $2, created_at = NOW()`,
       [email, otp]
     );
 
@@ -746,11 +892,132 @@ async function resetPasswordWithOtp(req, res) {
     await pool.query("DELETE FROM otps WHERE email = $1", [email]);
 
     res.json({ message: "Password changed successfully! You can now login." });
+
   } catch (err) {
     console.error("Reset Password error:", err);
     res.status(500).json({ error: "Failed to reset password." });
   }
 }
+
+// ----------------------
+// ACTIVE SESSIONS (NEW)
+// ----------------------
+async function getActiveSessions(req, res) {
+  try {
+    const userId = req.user.id;
+    // Get all valid refresh tokens
+    const result = await pool.query(
+      `SELECT id, ip_address, user_agent, created_at, expires_at 
+       FROM refresh_tokens 
+       WHERE user_id = $1 AND revoked = FALSE AND expires_at > NOW() 
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    // Ideally we want to mark which one is CURRENT. 
+    // The middleware doesn't strictly pass the current Refresh Token ID, 
+    // but we can try to match by strictly comparing the refresh token if we had it, 
+    // or just rely on the latest one being likely current or matching IP/UA.
+    // GUIDANCE: A simple heuristic is matching the current request's signature if possible, 
+    // but for now just returning the list is sufficient.
+
+    // We can try to guess "current" by matching the cookie's refresh token if present
+    const currentRefreshToken = req.cookies?.refreshToken;
+    let currentSessionId = null;
+
+    if (currentRefreshToken) {
+      const hashed = crypto.createHash("sha256").update(currentRefreshToken).digest("hex");
+      // We can't query token value directly because we didn't select it (security), 
+      // but we can verify against the ID if we selected token too.
+      // Let's secure-select token just to compare, then remove it.
+      const secureResult = await pool.query(
+        `SELECT id, token FROM refresh_tokens WHERE user_id = $1 AND revoked = FALSE AND expires_at > NOW()`,
+        [userId]
+      );
+      const match = secureResult.rows.find(row => row.token === hashed);
+      if (match) currentSessionId = match.id;
+    }
+
+    const sessions = result.rows.map(row => ({
+      id: row.id,
+      ip: row.ip_address,
+      device: row.user_agent, // Frontend will parse this
+      isCurrent: row.id === currentSessionId,
+      createdAt: row.created_at,
+    }));
+
+    res.json(sessions);
+  } catch (err) {
+    console.error("Get Active Sessions error:", err);
+    res.status(500).json({ error: "Failed to fetch active sessions." });
+  }
+}
+
+async function revokeAllSessions(req, res) {
+  try {
+    const userId = req.user.id;
+    // Revoke all tokens for this user
+    await pool.query(
+      "UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1",
+      [userId]
+    );
+    // Clear cookie for current user too effectively logging them out
+    res.clearCookie("refreshToken");
+    res.json({ message: "All sessions revoked. You have been logged out." });
+  } catch (err) {
+    console.error("Revoke All Sessions error:", err);
+    res.status(500).json({ error: "Failed to revoke sessions." });
+  }
+}
+
+async function getPublicProfileById(req, res) {
+  try {
+    const { id } = req.params;
+
+    // Validate ID (assuming integer IDs for now, or UUID)
+    // If it's literally the string "undefined" or null
+    if (!id || id === 'undefined' || id === 'null') {
+      return res.status(400).json({ error: "Invalid User ID provided." });
+    }
+
+    // Fetch Badge & Username
+    const userResult = await pool.query("SELECT id, username, badges, name FROM users WHERE id = $1", [id]);
+    if (userResult.rowCount === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    const user = userResult.rows[0];
+
+    // Fetch Approved Notes
+    const notesResult = await pool.query(`
+SELECT
+id, title, subject, view_count, approval_status,
+  created_at, university_name, course, material_type,
+  user_id
+      FROM notes 
+      WHERE user_id = $1 AND approval_status = 'approved'
+      ORDER BY created_at DESC
+  `, [user.id]);
+
+    res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        badges: user.badges || []
+      },
+      notes: notesResult.rows
+    });
+  } catch (err) {
+    console.error("Get Public Profile By ID error:", err.message);
+    // Handle specific DB errors regarding type syntax
+    if (err.code === '22P02') { // invalid text representation for integer
+      return res.status(400).json({ error: "Invalid User ID format." });
+    }
+    res.status(500).json({ error: "Failed to fetch user profile." });
+  }
+}
+
+
 async function updateMyProfile(req, res) {
   try {
     const user = await updateUserProfile(req.user.id, req.body);
@@ -762,6 +1029,52 @@ async function updateMyProfile(req, res) {
 }
 
 // ----------------------
+async function searchUsers(req, res) {
+  try {
+    const { q } = req.query;
+    if (!q || q.trim().length === 0) {
+      return res.json([]);
+    }
+
+    const searchTerm = `%${q.trim()}%`;
+    const result = await pool.query(
+      `SELECT id, name, username 
+       FROM users 
+       WHERE (name ILIKE $1 OR username ILIKE $1) 
+       AND is_verified = true
+       LIMIT 10`,
+      [searchTerm]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Search Users error:", err);
+    res.status(500).json({ error: "Failed to search users" });
+  }
+}
+
+// EXPORTS (include new functions)
+async function submitContactForm(req, res) {
+  try {
+    const { name, email, message } = req.body;
+    const userId = req.user ? req.user.id : null;
+
+    if (!name || !email || !message) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    await pool.query(
+      `INSERT INTO contact_messages (user_id, name, email, message) VALUES ($1, $2, $3, $4)`,
+      [userId, name, email, message]
+    );
+
+    res.status(201).json({ message: "Message sent successfully" });
+  } catch (err) {
+    console.error("Contact Form Error:", err);
+    res.status(500).json({ error: "Failed to submit message" });
+  }
+}
+
 // EXPORTS (include new functions)
 module.exports = {
   registerUser,
@@ -771,6 +1084,7 @@ module.exports = {
   verifyEmailOtp,
   changePassword,
   getPublicProfile,
+  getPublicProfileById,
   getUserStats,
   getDashboardData,
   getProfile,
@@ -787,4 +1101,8 @@ module.exports = {
   // Phase 7
   refreshAuthToken,
   logout,
+  getActiveSessions,
+  revokeAllSessions,
+  searchUsers,
+  submitContactForm // Added
 };

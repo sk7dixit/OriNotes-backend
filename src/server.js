@@ -121,9 +121,15 @@ function runBadgeChecksIfAvailable() {
   }
 }
 
+const { initSocket } = require('./socket');
+
 // Start the HTTP server
 const server = app.listen(PORT, async () => {
   console.log(`🚀 Server is listening on port ${PORT} (env: ${process.env.NODE_ENV || 'development'})`);
+
+  // Initialize Socket.io
+  initSocket(server);
+  console.log('🔌 Socket.io initialized');
 
   // Run admin-account fix (if env configured)
   await fixAdminAccount().catch(err => console.error('fixAdminAccount error:', err));

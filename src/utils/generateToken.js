@@ -10,7 +10,7 @@ function generateToken(user) {
       username: user.username, // **THE FIX IS HERE**
       is_two_factor_enabled: user.is_two_factor_enabled || false,
     },
-    process.env.JWT_SECRET || "default_secret",
+    process.env.JWT_SECRET || "smart_notes_secure_secret",
     { expiresIn: "7d" }
   );
 }

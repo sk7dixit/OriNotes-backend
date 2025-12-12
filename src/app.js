@@ -35,6 +35,7 @@ app.use(
       "http://localhost:3000",
       "http://127.0.0.1:3000",
       // ⬆️ FIX: Adding ports 3000 to resolve the CORS error seen in the console
+      "http://localhost:5174", // Added for debug/dev session
       "https://orinotes.netlify.app", // Your live frontend URL
       process.env.FRONTEND_URL,
     ].filter(Boolean),
@@ -88,3 +89,4 @@ app.use((err, req, res, next) => {
 
 // Export the configured app instance
 module.exports = app;
+// Force restart: Added logging to authMiddleware

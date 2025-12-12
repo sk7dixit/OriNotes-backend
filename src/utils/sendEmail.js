@@ -2,6 +2,7 @@
 
 const sgMail = require('@sendgrid/mail');
 const nodemailer = require('nodemailer');
+const pool = require('../config/db'); // Import DB connection
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const EMAIL_FROM = 'OriNotes Admin <helloworld760975@gmail.com>';
@@ -15,27 +16,74 @@ if (SENDGRID_API_KEY) {
   }
 }
 
-// Nodemailer SMTP transport fallback
-let smtpTransport = null;
-if (process.env.SMTP_HOST && process.env.SMTP_USER) {
-  smtpTransport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: process.env.SMTP_SECURE === 'true' || false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
+/**
+ * Helper to fetch email settings from DB
+ */
+async function getEmailSettings() {
+  try {
+    const res = await pool.query(
+      "SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_secure', 'enable_system_emails')"
+    );
+    const settings = res.rows.reduce((acc, row) => {
+      acc[row.setting_key] = row.setting_value;
+      return acc;
+    }, {});
+    return settings;
+  } catch (err) {
+    console.error("Failed to fetch email settings from DB", err);
+    return {};
+  }
 }
 
 /**
- * Generic send function. Try SendGrid, fall back to SMTP.
- * Throws if neither provider is available or both providers fail.
- * @param {{to:string,subject:string,html?:string,text?:string}} param0
+ * Generic send function. Priority:
+ * 1. DB-configured SMTP (if enabled)
+ * 2. Env-configured SendGrid
+ * 3. Env-configured SMTP
  */
 async function sendEmail({ to, subject, html, text }) {
-  // Try SendGrid first
+  // 1. Fetch dynamic settings
+  const dbSettings = await getEmailSettings();
+  const systemEmailsEnabled = dbSettings.enable_system_emails === 'true'; // Check explicit 'true' string
+
+  // If DB setup exists and is valid, try it first
+  // Note: Only enforce enabled check if we want to BLOCK emails when disabled. 
+  // For now, let's assume we proceed if settings exist, or we can check the toggle.
+  // If 'enable_system_emails' is explicitly false, maybe we shouldn't send? 
+  // Use case: Maintenance mode or just disabling spam.
+  if (dbSettings.enable_system_emails === 'false') {
+    console.log('System emails are disabled in Admin Settings.');
+    return { provider: 'disabled' };
+  }
+
+  // 2. Try DB SMTP
+  if (dbSettings.smtp_host) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: dbSettings.smtp_host,
+        port: Number(dbSettings.smtp_port || 587),
+        secure: dbSettings.smtp_secure === 'true', // or port 465 logic
+        auth: (dbSettings.smtp_user && dbSettings.smtp_pass) ? {
+          user: dbSettings.smtp_user,
+          pass: dbSettings.smtp_pass,
+        } : undefined,
+      });
+
+      await transporter.sendMail({
+        from: EMAIL_FROM,
+        to,
+        subject,
+        html,
+        text,
+      });
+      return { provider: 'db-smtp' };
+    } catch (err) {
+      console.error('sendEmail: DB SMTP config failed. Falling back...', err.message);
+      // Fall through to env vars
+    }
+  }
+
+  // 3. Try SendGrid (Env)
   if (SENDGRID_API_KEY) {
     try {
       await sgMail.send({
@@ -47,31 +95,39 @@ async function sendEmail({ to, subject, html, text }) {
       });
       return { provider: 'sendgrid' };
     } catch (err) {
-      // Log and fall back
       console.error('sendEmail: SendGrid error:', err?.response?.body || err.message || err);
     }
   }
 
-  // Nodemailer fallback
-  if (smtpTransport) {
+  // 4. Try Nodemailer (Env fallback)
+  if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+    // Reuse the static transport logic or recreate
+    // (Simplified inline here for clarity)
     try {
-      await smtpTransport.sendMail({
+      const envTransport = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+      await envTransport.sendMail({
         from: EMAIL_FROM,
         to,
         subject,
         html,
         text,
       });
-      return { provider: 'smtp' };
+      return { provider: 'env-smtp' };
     } catch (err) {
-      console.error('sendEmail: Nodemailer error:', err);
-      // Rethrow Nodemailer error
+      console.error('sendEmail: Env SMTP error:', err);
       throw err;
     }
   }
 
-  // No provider configured — log and throw
-  const msg = 'No email provider configured. Set SENDGRID_API_KEY or SMTP_* env vars.';
+  const msg = 'No email provider configured or all failed.';
   console.error('sendEmail:', msg);
   throw new Error(msg);
 }
@@ -177,10 +233,34 @@ async function sendLoginNotification(to, meta = {}) {
   }
 }
 
+async function sendMaintenanceOverEmail(to) {
+  const subject = 'OriNotes — Maintenance Completed';
+  const html = `
+    <div style="font-family: Arial, Helvetica, sans-serif;">
+      <h3>We are back online!</h3>
+      <p>The scheduled maintenance for OriNotes has been completed.</p>
+      <p>You can now access the platform and continue your work.</p>
+      <p style="margin: 18px 0;">
+        <a href="http://localhost:5173" target="_blank" style="background:#22c55e;color:white;padding:10px 14px;border-radius:6px;text-decoration:none;">Go to OriNotes</a>
+      </p>
+      <p>Thank you for your patience.</p>
+    </div>
+  `;
+  const text = `OriNotes maintenance is complete. You can now access the platform.`;
+
+  try {
+    return await sendEmail({ to, subject, html, text });
+  } catch (err) {
+    console.error(`sendMaintenanceOverEmail: failed to send to ${to}`, err);
+    return { success: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendEmail,
   sendResetPasswordEmail,
   sendPasswordReset, // alias
   sendEmailOtp,
   sendLoginNotification,
+  sendMaintenanceOverEmail,
 };

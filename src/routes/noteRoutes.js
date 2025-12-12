@@ -25,6 +25,9 @@ router.get('/available-subjects', noteController.getAvailableSubjects);
 // GET /api/notes/free/latest
 router.get('/free/latest', noteController.getFreeNote);
 
+// Shared With Me (Place BEFORE /:id to prevent conflict)
+router.get('/shared-with-me', authMiddleware, noteController.getSharedNotes);
+
 // GET /api/notes/:id - note metadata
 router.get('/:id', noteController.getSingleNote);
 
@@ -58,15 +61,16 @@ router.post('/upload',
 // Multi-upload (files[] + titles[]), up to configured max (controller also validates)
 router.post('/multi-upload',
   authMiddleware,
-  uploadMiddleware.array('files[]', parseInt(process.env.MULTI_UPLOAD_MAX_FILES || '10', 10)),
+  uploadMiddleware.array('files', parseInt(process.env.MULTI_UPLOAD_MAX_FILES || '10', 10)),
   noteController.handleMultiUpload
 );
 
 // ----------------- Access / Sharing -----------------
+router.get('/access/requests', authMiddleware, noteController.getAccessRequests);
 router.post('/access/request/:noteId', authMiddleware, noteController.requestNoteAccess);
-router.put('/access/respond/:requestId', authMiddleware, adminMiddleware, noteController.respondToAccessRequest);
+router.put('/access/respond/:requestId', authMiddleware, noteController.respondToAccessRequest);
 
-router.get('/shared-with-me', authMiddleware, noteController.getSharedNotes);
+
 
 // ----------------- Admin review -----------------
 router.get('/admin/all', authMiddleware, adminMiddleware, noteController.getAllNotes);
