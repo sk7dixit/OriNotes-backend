@@ -6,7 +6,7 @@ const isProduction = !!process.env.DATABASE_URL || process.env.NODE_ENV === "pro
 
 const maxClients = parseInt(process.env.MAX_DB_CLIENTS || "20", 10);
 const idleTimeoutMillis = parseInt(process.env.DB_IDLE_TIMEOUT_MS || "30000", 10); // 30s
-const connectionTimeoutMillis = parseInt(process.env.DB_CONN_TIMEOUT_MS || "2000", 10); // 2s
+const connectionTimeoutMillis = parseInt(process.env.DB_CONN_TIMEOUT_MS || "10000", 10); // 10s
 
 let connectionConfig = {
   max: maxClients,
