@@ -114,8 +114,8 @@ router.get('/:id/versions', noteController.getNoteVersions || ((req, res) => res
 router.get('/admin/user-submissions', authMiddleware, adminMiddleware, noteController.getUserSubmissions || ((req, res) => res.status(501).json({ error: 'Not implemented' })));
 
 // ----------------- Delete Requests (Admin) -----------------
-router.get('/admin/delete-requests', authMiddleware, adminMiddleware, noteController.getDeleteRequests);
-router.put('/admin/delete-requests/:noteId', authMiddleware, adminMiddleware, noteController.reviewDeleteRequest);
+// router.get('/admin/delete-requests', authMiddleware, adminMiddleware, noteController.getDeleteRequests);
+// router.put('/admin/delete-requests/:noteId', authMiddleware, adminMiddleware, noteController.reviewDeleteRequest);
 
 // Export router
 module.exports = router;
