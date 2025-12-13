@@ -1105,7 +1105,7 @@ async function sendNotification(recipientId, title, message, type, refId, refUrl
   }
 }
 
-const { sendNotification } = require('../utils/notificationService');
+
 
 // ------------------ RATINGS ------------------
 async function addNoteRating(req, res) {
