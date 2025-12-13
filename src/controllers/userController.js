@@ -1205,24 +1205,17 @@ module.exports = {
   resetPasswordWithOtp,
   updateMyProfile,
   forgotPassword,
-  requestPasswordReset, // Added back as it was likely conditional or alias
   resetPassword,
   verifyEmail,
   generateTwoFactorSecret,
   verifyTwoFactorSetup,
-  disableTwoFactorHandler, // Corrected name based on imports? No, keeping consistent with list
-  verifyTwoFactorLogin, // Added
-  disableTwoFactorAuth, // Was in old list
+  verifyTwoFactorLogin,
+  disableTwoFactorAuth,
   refreshAuthToken,
-  logout, // Note: might be logoutUser
-  logoutUser, // Added to be safe
+  logout,
   getActiveSessions,
   revokeAllSessions,
   searchUsers,
   submitContactForm,
-  socialLogin,
-  verifyPassword, // Added from imports
-  getUserProfile, // Added from imports
-  updateUserProfileHandler, // Added
-  setupTwoFactor // Added
+  socialLogin
 };
