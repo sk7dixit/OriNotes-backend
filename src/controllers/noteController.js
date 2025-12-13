@@ -1372,8 +1372,6 @@ module.exports = {
   getAllNotes,
   getPendingNotes,
   reviewNote,
-  deleteUser,
-  submitContactForm,
   addNoteRating,
   getNoteRatings,
   getAccessRequests,
@@ -1385,7 +1383,5 @@ module.exports = {
   addFavourite,
   removeFavourite,
   reportNote,
-  getDeleteRequests,
-  reviewDeleteRequest,
   uploadMiddleware // Exported for use in routes
 };
