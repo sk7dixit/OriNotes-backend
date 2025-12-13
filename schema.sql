@@ -141,6 +141,7 @@ CREATE TABLE public.notes (
     approval_status character varying(20) DEFAULT 'pending'::character varying NOT NULL, -- pending, approved, rejected
     rejection_reason text,
     is_free boolean DEFAULT false,
+    state character varying(100), -- Added for university location filtering
     expiry_date date
 );
 CREATE INDEX idx_notes_user_id ON public.notes(user_id);
@@ -200,6 +201,33 @@ CREATE TABLE public.note_ratings (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (note_id, user_id)
 );
+
+CREATE TABLE public.pending_registrations (
+    id BIGSERIAL PRIMARY KEY,
+    name character varying(100) NOT NULL,
+    email character varying(150) UNIQUE NOT NULL,
+    password character varying(255) NOT NULL,
+    username character varying(50) NOT NULL,
+    mobile_number character varying(255),
+    role character varying(20) DEFAULT 'user'::character varying,
+    otp character varying(6) NOT NULL,
+    otp_created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '10 minutes')
+);
+CREATE INDEX IF NOT EXISTS idx_pending_registrations_email ON public.pending_registrations(email);
+
+CREATE TABLE public.refresh_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    user_agent TEXT,
+    ip_address TEXT,
+    revoked BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON public.refresh_tokens(user_id);
 
 CREATE TABLE public.user_favourites (
     user_id integer NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
