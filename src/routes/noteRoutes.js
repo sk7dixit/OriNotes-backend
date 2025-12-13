@@ -25,6 +25,9 @@ router.get('/available-subjects', noteController.getAvailableSubjects);
 // GET /api/notes/free/latest
 router.get('/free/latest', noteController.getFreeNote);
 
+// My notes (MUST be before /:id)
+router.get('/me', authMiddleware, noteController.getMyNotes);
+
 // Shared With Me (Place BEFORE /:id to prevent conflict)
 router.get('/shared-with-me', authMiddleware, noteController.getSharedNotes);
 
@@ -101,15 +104,18 @@ router.delete('/:id', authMiddleware, noteController.removeNote);
 // Batch delete owned notes
 router.post('/delete', authMiddleware, noteController.deleteMyNotes);
 
-// My notes
-router.get('/me', authMiddleware, noteController.getMyNotes);
+
 
 // Misc / fallback endpoints (versions etc.)
 router.post('/:id/version', authMiddleware, uploadMiddleware.single('file'), noteController.uploadNoteVersion || ((req, res) => res.status(501).json({ error: 'Not implemented' })));
 router.get('/:id/versions', noteController.getNoteVersions || ((req, res) => res.status(501).json({ error: 'Not implemented' })));
 
-// Admin extras
+// Admins extras
 router.get('/admin/user-submissions', authMiddleware, adminMiddleware, noteController.getUserSubmissions || ((req, res) => res.status(501).json({ error: 'Not implemented' })));
+
+// ----------------- Delete Requests (Admin) -----------------
+router.get('/admin/delete-requests', authMiddleware, adminMiddleware, noteController.getDeleteRequests);
+router.put('/admin/delete-requests/:noteId', authMiddleware, adminMiddleware, noteController.reviewDeleteRequest);
 
 // Export router
 module.exports = router;

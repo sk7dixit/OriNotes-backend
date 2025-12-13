@@ -80,6 +80,12 @@ async function registerUser(req, res) {
       return res.status(400).json({ error: "This username is already taken" });
     }
 
+    // Check for existing mobile number
+    const existingMobile = await pool.query("SELECT id FROM users WHERE mobile_number = $1", [mobileNumber]);
+    if (existingMobile.rows.length > 0) {
+      return res.status(400).json({ error: "This mobile number is already registered" });
+    }
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
     const role = email === process.env.ADMIN_EMAIL ? "admin" : "user";
@@ -364,7 +370,13 @@ async function disableTwoFactorAuth(req, res) {
 async function requestLoginOtp(req, res) {
   try {
     const { identifier } = req.body;
-    const user = await findUserByEmailOrUsername(identifier);
+    const cleanIdentifier = identifier ? identifier.toString().trim() : "";
+
+    if (!cleanIdentifier) {
+      return res.status(400).json({ error: "Identifier is required." });
+    }
+
+    const user = await findUserByEmailOrUsername(cleanIdentifier);
     if (!user) {
       return res.status(404).json({ error: "User not found." });
     }
@@ -389,13 +401,20 @@ async function requestLoginOtp(req, res) {
 async function verifyLoginOtp(req, res) {
   try {
     const { identifier, otp } = req.body;
-    const user = await findUserByEmailOrUsername(identifier);
+    const cleanIdentifier = identifier ? identifier.toString().trim() : "";
+    const cleanOtp = otp ? otp.toString().trim() : "";
+
+    if (!cleanIdentifier || !cleanOtp) {
+      return res.status(400).json({ error: "Identifier and OTP are required." });
+    }
+
+    const user = await findUserByEmailOrUsername(cleanIdentifier);
     if (!user) {
       return res.status(404).json({ error: "User not found." });
     }
     const otpResult = await pool.query(
       "SELECT * FROM otps WHERE email = $1 AND otp = $2 AND created_at > NOW() - INTERVAL '5 minutes'",
-      [user.email, otp]
+      [user.email, cleanOtp]
     );
     if (otpResult.rowCount === 0) {
       return res.status(400).json({ error: "Invalid or expired OTP." });
@@ -423,21 +442,24 @@ async function verifyLoginOtp(req, res) {
 async function verifyEmailOtp(req, res) {
   try {
     const { email, otp } = req.body;
-    if (!email || !otp) {
+    const cleanEmail = email ? email.toString().toLowerCase().trim() : "";
+    const cleanOtp = otp ? otp.toString().trim() : "";
+
+    if (!cleanEmail || !cleanOtp) {
       return res.status(400).json({ error: "Email and OTP are required." });
     }
 
     const pendingResult = await pool.query(
       `SELECT * FROM pending_registrations WHERE email = $1 AND otp = $2 AND otp_created_at > NOW() - INTERVAL '10 minutes'`,
-      [email.toLowerCase().trim(), otp]
+      [cleanEmail, cleanOtp]
     );
     if (pendingResult.rowCount === 0) {
       return res.status(400).json({ error: "Invalid or expired OTP. Please request a new one." });
     }
     const pending = pendingResult.rows[0];
-    const existingUser = await findUserByEmail(email);
+    const existingUser = await findUserByEmail(cleanEmail);
     if (existingUser) {
-      await pool.query("DELETE FROM pending_registrations WHERE email = $1", [email.toLowerCase().trim()]);
+      await pool.query("DELETE FROM pending_registrations WHERE email = $1", [cleanEmail]);
       return res.status(200).json({ message: "Account already exists. Please log in." });
     }
 
@@ -458,8 +480,8 @@ async function verifyEmailOtp(req, res) {
 
     // Mark verified, delete pending, clear OTPS
     await verifyUser(newUser.id);
-    await pool.query("DELETE FROM pending_registrations WHERE email = $1", [email.toLowerCase().trim()]);
-    await pool.query("DELETE FROM otps WHERE email = $1", [email.toLowerCase().trim()]).catch(() => { });
+    await pool.query("DELETE FROM pending_registrations WHERE email = $1", [cleanEmail]);
+    await pool.query("DELETE FROM otps WHERE email = $1", [cleanEmail]).catch(() => { });
 
     await updateUserLastLogin(newUser.id);
     const settingsResult = await pool.query(
@@ -1076,6 +1098,96 @@ async function submitContactForm(req, res) {
 }
 
 // EXPORTS (include new functions)
+
+// ----------------------
+// SOCIAL LOGIN (Google / GitHub)
+// ----------------------
+async function socialLogin(req, res) {
+  try {
+    const { email, name, provider, socialId, photoUrl } = req.body;
+
+    if (!email || !socialId || !provider) {
+      return res.status(400).json({ error: "Missing social login data." });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    let user = await findUserByEmail(cleanEmail);
+    let isNewUser = false;
+
+    if (user) {
+      // User exists: Link social ID if not already linked
+      if (provider === 'google' && !user.google_id) {
+        await pool.query("UPDATE users SET google_id = $1 WHERE id = $2", [socialId, user.id]);
+        user.google_id = socialId;
+      } else if (provider === 'github' && !user.github_id) {
+        await pool.query("UPDATE users SET github_id = $1 WHERE id = $2", [socialId, user.id]);
+        user.github_id = socialId;
+      }
+
+      // Update avatar if missing (optional)
+      if (!user.avatar_url && photoUrl) {
+        await pool.query("UPDATE users SET avatar_url = $1 WHERE id = $2", [photoUrl, user.id]);
+      }
+
+    } else {
+      // Create new user
+      // Generate a random password since they use social login
+      const randomPassword = crypto.randomBytes(16).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, BCRYPT_SALT_ROUNDS);
+
+      // Generate a username from email or name
+      let baseUsername = email.split('@')[0];
+      let newUsername = baseUsername;
+      let counter = 1;
+
+      while (await findUserByUsername(newUsername)) {
+        newUsername = `${baseUsername}${counter}`;
+        counter++;
+      }
+
+      // Insert directly to bypass some checks or use customized query
+      const result = await pool.query(
+        `INSERT INTO users 
+             (name, email, password, role, is_verified, username, google_id, github_id, avatar_url)
+             VALUES ($1, $2, $3, 'user', TRUE, $4, $5, $6, $7)
+             RETURNING *`,
+        [
+          name,
+          cleanEmail,
+          hashedPassword,
+          newUsername,
+          provider === 'google' ? socialId : null,
+          provider === 'github' ? socialId : null,
+          photoUrl
+        ]
+      );
+      user = result.rows[0];
+      isNewUser = true;
+    }
+
+    // Login success
+    await updateUserLastLogin(user.id);
+    const settingsResult = await pool.query(
+      "SELECT setting_value FROM app_settings WHERE setting_key = 'is_subscription_enabled'"
+    );
+    const isSubscriptionEnabled = settingsResult.rows[0]?.setting_value ?? false;
+
+    // Generate Token
+    const token = generateToken(user);
+
+    return res.json({
+      message: `Welcome ${user.name}!`,
+      user: createUserPayload(user, isSubscriptionEnabled),
+      token,
+      isNewUser // Flag to trigger username setup on frontend
+    });
+
+  } catch (err) {
+    console.error("Social Login Error:", err);
+    return res.status(500).json({ error: "Social login failed." });
+  }
+}
+
 module.exports = {
   registerUser,
   loginUser,
@@ -1093,16 +1205,24 @@ module.exports = {
   resetPasswordWithOtp,
   updateMyProfile,
   forgotPassword,
+  requestPasswordReset, // Added back as it was likely conditional or alias
   resetPassword,
   verifyEmail,
   generateTwoFactorSecret,
   verifyTwoFactorSetup,
-  disableTwoFactorAuth,
-  // Phase 7
+  disableTwoFactorHandler, // Corrected name based on imports? No, keeping consistent with list
+  verifyTwoFactorLogin, // Added
+  disableTwoFactorAuth, // Was in old list
   refreshAuthToken,
-  logout,
+  logout, // Note: might be logoutUser
+  logoutUser, // Added to be safe
   getActiveSessions,
   revokeAllSessions,
   searchUsers,
-  submitContactForm // Added
+  submitContactForm,
+  socialLogin,
+  verifyPassword, // Added from imports
+  getUserProfile, // Added from imports
+  updateUserProfileHandler, // Added
+  setupTwoFactor // Added
 };

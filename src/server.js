@@ -12,6 +12,8 @@ const pool = require('./config/db'); // central DB pool used throughout the proj
 const bcrypt = require('bcrypt');
 
 const PORT = process.env.PORT || 5000;
+const { initAutoApprove } = require('./services/autoApproveService');
+
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ADMIN_NAME = process.env.ADMIN_NAME || 'Admin';
@@ -133,6 +135,9 @@ const server = app.listen(PORT, async () => {
 
   // Run admin-account fix (if env configured)
   await fixAdminAccount().catch(err => console.error('fixAdminAccount error:', err));
+
+  // Initialize Auto-Approve Scheduler
+  initAutoApprove();
 
   // Schedule or run badge checks if available
   runBadgeChecksIfAvailable();

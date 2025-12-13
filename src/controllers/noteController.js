@@ -687,11 +687,26 @@ async function getSingleNote(req, res) {
         userRole = decoded.role;
       } catch (e) {
         // Invalid token, treat as guest
-        console.warn("Invalid token in getSingleNote", e.message);
+        // console.warn("Invalid token in getSingleNote", e.message);
       }
     }
 
     // 2. Determine Access
+    if (userId) {
+      // --- NEW: Unique View Counting ---
+      // Insert into user_views. If conflict (dup), do nothing.
+      // RETURNING id allows us to know if a new row was inserted.
+      const viewResult = await pool.query(
+        "INSERT INTO user_views (user_id, note_id) VALUES ($1, $2) ON CONFLICT (user_id, note_id) DO NOTHING RETURNING id",
+        [userId, id]
+      );
+
+      // If a new view was recorded, increment the note's total view count
+      if (viewResult.rowCount > 0) {
+        await pool.query("UPDATE notes SET view_count = view_count + 1 WHERE id = $1", [id]);
+      }
+    }
+
     if (note.material_type === 'university_material') {
       hasAccess = true; // Publicly accessible
     } else {
@@ -768,11 +783,8 @@ async function serveNoteWithWatermark(req, res) {
       const resp = await fetch(remoteUrl);
       if (!resp.ok) throw new Error('Failed to fetch remote PDF for watermarking');
       const remoteBuffer = Buffer.from(await resp.arrayBuffer());
-      const logoPath = path.join(__dirname, '..', 'assets', 'learnify-logo.png');
-      const logoBytes = await fs.readFile(logoPath);
       const pdfDoc = await PDFDocument.load(remoteBuffer);
-      const logoImage = await pdfDoc.embedPng(logoBytes);
-      const logoDims = logoImage.scale(0.15);
+      // Removed logo logic by user request
       if (viewingUser.role !== 'admin' && String(note.user_id) !== String(viewingUser.id)) {
         const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
         const pages = pdfDoc.getPages();
@@ -780,9 +792,6 @@ async function serveNoteWithWatermark(req, res) {
           const { width, height } = page.getSize();
           page.drawText(`Viewed by ${viewingUser.username}`, {
             x: width / 2 - 100, y: height / 2, font, size: 42, color: rgb(0.8, 0.2, 0.2), opacity: 0.12, rotate: { type: 'degrees', angle: -45 },
-          });
-          page.drawImage(logoImage, {
-            x: width - logoDims.width - 20, y: height - logoDims.height - 20, width: logoDims.width, height: logoDims.height, opacity: 0.16,
           });
         }
       }
@@ -795,13 +804,11 @@ async function serveNoteWithWatermark(req, res) {
 
     // Local file path handling
     const notePath = path.join(__dirname, '..', '..', 'uploads', path.basename(note.pdf_path));
-    const logoPath = path.join(__dirname, '..', 'assets', 'learnify-logo.png');
+    // Removed logo logic
 
     const pdfBytes = await fs.readFile(notePath);
-    const logoBytes = await fs.readFile(logoPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
-    const logoImage = await pdfDoc.embedPng(logoBytes);
-    const logoDims = logoImage.scale(0.15);
+    // Removed embedPng logic
     if (viewingUser.role !== 'admin' && String(note.user_id) !== String(viewingUser.id)) {
       const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
       const pages = pdfDoc.getPages();
@@ -809,9 +816,6 @@ async function serveNoteWithWatermark(req, res) {
         const { width, height } = page.getSize();
         page.drawText(`Viewed by ${viewingUser.username}`, {
           x: width / 2 - 100, y: height / 2, font, size: 50, color: rgb(0.8, 0.2, 0.2), opacity: 0.15, rotate: { type: 'degrees', angle: -45 },
-        });
-        page.drawImage(logoImage, {
-          x: width - logoDims.width - 20, y: height - logoDims.height - 20, width: logoDims.width, height: logoDims.height, opacity: 0.2,
         });
       }
     }
@@ -1032,6 +1036,21 @@ async function removeNote(req, res) {
       return res.status(403).json({ error: "Unauthorized to delete this note." });
     }
 
+    // NEW (Delete Request Flow): If user is NOT admin, mark for deletion instead
+    if (userRole !== 'admin') {
+      const { reason } = req.body;
+      await pool.query(
+        "UPDATE notes SET deletion_requested = TRUE, deletion_reason = $1 WHERE id = $2",
+        [reason || 'User requested deletion', id]
+      );
+
+      // Notify admins (optional, but good practice)
+      // We can iterate admins and send notification here if desired.
+
+      return res.json({ message: "Deletion request submitted for admin approval." });
+    }
+
+    // IF ADMIN: Proceed to actual deletion
     // Delete file from Cloudinary or Local Storage
     if (note.cloudinary_public_id) {
       await cloudinary.uploader.destroy(note.cloudinary_public_id, { resource_type: 'raw' });
@@ -1085,6 +1104,8 @@ async function sendNotification(recipientId, title, message, type, refId, refUrl
     console.error("❌ Error sending notification:", err);
   }
 }
+
+const { sendNotification } = require('../utils/notificationService');
 
 // ------------------ RATINGS ------------------
 async function addNoteRating(req, res) {
@@ -1284,7 +1305,8 @@ async function getMyNotes(req, res) {
       SELECT 
         id, title, subject, created_at, approval_status, view_count, 
         file_url, pdf_path, rejection_reason,
-        university_name, course, field, material_type, state
+        university_name, course, field, material_type, state,
+        deletion_requested, deletion_reason
       FROM notes 
       WHERE user_id = $1 
       ORDER BY created_at DESC
@@ -1336,33 +1358,34 @@ async function getNoteRatings(req, res) {
 
 
 module.exports = {
-  uploadMiddleware,
   uploadUserNote,
   handleMultiUpload,
-  getPendingNotes,
-  getAccessRequests,
-  reviewNote,
   getFilteredNotes,
-  addNote,
-  getSingleNote,
-  reviewNoteVersion,
-  addFavourite,
-  removeFavourite,
-  getFavourites,
-  getFavouriteIds,
-  serveNoteWithWatermark,
+  getAvailableSubjects,
   getFreeNote,
   getMyNotes,
   deleteMyNotes,
-  reportNote,
-  getAvailableSubjects,
+  getSingleNote,
+  serveNoteWithWatermark,
   editNote,
   removeNote,
-  getSharedNotes,
+  getAllNotes,
+  getPendingNotes,
+  reviewNote,
+  deleteUser,
+  submitContactForm,
+  addNoteRating,
+  getNoteRatings,
+  getAccessRequests,
   requestNoteAccess,
   respondToAccessRequest,
-  getNoteRatings,
-  addNoteRating,
-  getAllNotes,
-  uploadNoteVersion
+  getSharedNotes,
+  getFavouriteIds,
+  getFavourites,
+  addFavourite,
+  removeFavourite,
+  reportNote,
+  getDeleteRequests,
+  reviewDeleteRequest,
+  uploadMiddleware // Exported for use in routes
 };

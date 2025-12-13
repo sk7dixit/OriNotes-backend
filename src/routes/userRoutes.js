@@ -40,6 +40,7 @@ router.post("/logout", logout);
 router.post("/refresh", refreshAuthToken);
 router.post("/login-otp-request", requestLoginOtp);
 router.post("/login-otp-verify", verifyLoginOtp);
+router.post("/social-login", require("../controllers/userController").socialLogin);
 
 // --- ACCOUNT VERIFICATION ---
 router.post("/verify-email-otp", verifyEmailOtp);
