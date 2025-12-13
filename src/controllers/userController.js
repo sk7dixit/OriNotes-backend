@@ -1209,7 +1209,6 @@ module.exports = {
   verifyEmail,
   generateTwoFactorSecret,
   verifyTwoFactorSetup,
-  verifyTwoFactorLogin,
   disableTwoFactorAuth,
   refreshAuthToken,
   logout,
