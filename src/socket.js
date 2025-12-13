@@ -18,7 +18,7 @@ function initSocket(server) {
         socket.on("joinChat", async () => {
             try {
                 const res = await pool.query(
-                    "SELECT * FROM chat_messages ORDER BY created_at ASC LIMIT 50" // ASC to show oldest top, newest bottom? Standard chat is top-down.
+                    "SELECT id, user_id, username, message_text as text, created_at FROM chat_messages ORDER BY created_at ASC LIMIT 50"
                 );
                 // If query returns oldest first (ASC), client usually renders top-down. 
                 socket.emit("chatHistory", res.rows);
@@ -37,7 +37,7 @@ function initSocket(server) {
 
             try {
                 const result = await pool.query(
-                    "INSERT INTO chat_messages (text, username, user_id) VALUES ($1, $2, $3) RETURNING *",
+                    "INSERT INTO chat_messages (message_text, username, user_id) VALUES ($1, $2, $3) RETURNING id, user_id, username, message_text as text, created_at",
                     [msg.text, msg.username, msg.userId]
                 );
                 const savedMsg = result.rows[0];

@@ -1303,7 +1303,7 @@ async function getMyNotes(req, res) {
     res.json({ stats, notes });
   } catch (err) {
     console.error("Error fetching my notes:", err);
-    res.status(200).json({ notes: [], stats: { total: 0, approved: 0, pending: 0, rejected: 0, totalViews: 0 }, error: "Backend error handled gracefully." });
+    res.status(500).json({ error: "Failed to fetch notes.", details: err.message });
   }
 }
 
