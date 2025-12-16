@@ -245,38 +245,18 @@ async function handleMultiUpload(req, res) {
     }
 
     if (createdNotes.length === 0) {
+      return res.status(500).json({ error: 'All uploads failed', details: errors });
     }
 
+    return res.status(201).json({ message: `Uploaded ${createdNotes.length} files`, notes: createdNotes, errors });
+  } catch (err) {
+    console.error('handleMultiUpload error:', err);
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: `File size exceeds limit` });
+    }
+    return res.status(500).json({ error: 'Multi-upload failed', details: err.message });
   }
-if (createdNotes.length === 0) {
-    return res.status(500).json({ error: 'All uploads failed', details: errors });
-  }
-
-  return res.status(201).json({ message: `Uploaded ${createdNotes.length} files`, notes: createdNotes, errors });
-} catch (err) {
-  console.error('handleMultiUpload error:', err);
-  if (err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(400).json({ error: `File size exceeds limit of ${Math.round(MAX_FILE_SIZE_BYTES / (1024 * 1024))} MB` });
-  }
-  if (err.message && err.message.includes('Cloudinary')) {
-    return res.status(502).json({ error: 'Cloudinary upload failed. Please check server configuration.' });
-  }
-  return res.status(500).json({ error: 'Multi-upload failed', details: err.message });
 }
-  }
-
-if (createdNotes.length === 0) {
-  return res.status(500).json({ error: 'All uploads failed', details: errors });
-}
-return res.status(201).json({ message: `Uploaded ${createdNotes.length} files`, notes: createdNotes, errors });
-  } catch (outerErr) {
-  console.error("Critical Multi-upload error:", outerErr);
-  res.status(500).json({ error: "Server Error" });
-}
-}
-
-
-console.log('TRACE: handleMultiUpload passed');
 // ------------------ Original single-file upload ------------------
 const uploadUserNote = async function (req, res) {
   try {
@@ -1489,12 +1469,3 @@ module.exports = {
   reviewDeleteRequest,
   uploadMiddleware
 };
-
-
-
-
-}
-
-
-exports.checkStatus = 'EOF_REACHED';
-console.log('TRACE: EOF REACHED');
