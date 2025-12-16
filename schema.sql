@@ -69,7 +69,10 @@ CREATE TABLE public.users (
     bio text,
     badges text[] DEFAULT ARRAY[]::text[],
     reset_token TEXT,
-    reset_token_expires TIMESTAMPTZ
+    reset_token_expires TIMESTAMPTZ,
+    google_id character varying(255),
+    github_id character varying(255),
+    avatar_url text
 );
 
 -- PHASE 1 FIX: Pending Registration Table (temp storage until OTP verified)
@@ -102,6 +105,15 @@ CREATE TABLE public.refresh_tokens (
 );
 CREATE INDEX idx_refresh_tokens_user_id ON public.refresh_tokens(user_id);
 
+
+CREATE TABLE public.contact_messages (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES public.users(id) ON DELETE SET NULL,
+    name character varying(100) NOT NULL,
+    email character varying(150) NOT NULL,
+    message text NOT NULL,
+    created_at timestamp with time zone DEFAULT now()
+);
 
 CREATE TABLE public.otps (
     email character varying(255) PRIMARY KEY,

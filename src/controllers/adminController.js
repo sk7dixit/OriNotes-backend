@@ -484,9 +484,14 @@ async function searchGlobal(req, res) {
 
 async function getFeedbackMessages(req, res) {
     try {
+        // Fetch from suggestions table instead of contact_messages
+        // Joining with users to get details
         const result = await pool.query(`
-            SELECT * FROM contact_messages 
-            ORDER BY created_at DESC 
+            SELECT s.id, s.message, s.status, s.admin_reply, s.created_at, 
+                   u.name, u.email, u.username
+            FROM suggestions s
+            JOIN users u ON s.user_id = u.id
+            ORDER BY s.created_at DESC 
             LIMIT 50
         `);
         res.json(result.rows);

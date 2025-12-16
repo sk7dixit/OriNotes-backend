@@ -1346,7 +1346,7 @@ async function getNoteRatings(req, res) {
     // Calculate average
     const ratings = result.rows;
     const average = ratings.length > 0
-      ? (ratings.reduce((acc, r) => acc + r.rating, 0) / ratings.length).toFixed(1)
+      ? (ratings.reduce((acc, r) => acc + Number(r.rating), 0) / ratings.length).toFixed(1)
       : 0;
 
     res.json({ average, ratings });
@@ -1356,6 +1356,54 @@ async function getNoteRatings(req, res) {
   }
 }
 
+
+
+async function getDeleteRequests(req, res) {
+  try {
+    const result = await pool.query(`
+      SELECT n.id, n.title, n.created_at, n.deletion_reason, u.username
+      FROM notes n
+      JOIN users u ON n.user_id = u.id
+      WHERE n.deletion_requested = TRUE
+      ORDER BY n.created_at ASC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error fetching delete requests:", err);
+    res.status(500).json({ error: "Failed to fetch requests." });
+  }
+}
+
+async function reviewDeleteRequest(req, res) {
+  try {
+    const { noteId } = req.params;
+    const { action } = req.body; // 'approve' or 'reject'
+
+    if (action === 'reject') {
+      await pool.query("UPDATE notes SET deletion_requested = FALSE, deletion_reason = NULL WHERE id = $1", [noteId]);
+      return res.json({ message: "Deletion request rejected." });
+    } else if (action === 'approve') {
+      const note = await findNoteById(noteId);
+      if (!note) return res.status(404).json({ error: "Note not found" });
+
+      // Cleanup files
+      if (note.cloudinary_public_id) {
+        await cloudinary.uploader.destroy(note.cloudinary_public_id, { resource_type: 'raw' });
+      } else if (note.pdf_path) {
+        const filePath = path.join(__dirname, '..', '..', 'uploads', path.basename(note.pdf_path));
+        await fs.unlink(filePath).catch(err => console.error("Failed to delete file:", err.message));
+      }
+
+      await deleteNote(noteId);
+      return res.json({ message: "Note deleted successfully." });
+    } else {
+      return res.status(400).json({ error: "Invalid action" });
+    }
+  } catch (err) {
+    console.error("Error reviewing delete request:", err);
+    res.status(500).json({ error: "Failed to process request." });
+  }
+}
 
 module.exports = {
   uploadUserNote,
@@ -1383,5 +1431,7 @@ module.exports = {
   addFavourite,
   removeFavourite,
   reportNote,
+  getDeleteRequests,
+  reviewDeleteRequest,
   uploadMiddleware // Exported for use in routes
 };

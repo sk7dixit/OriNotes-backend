@@ -1,17 +1,11 @@
-const { Pool } = require('pg');
+const pool = require('../src/config/db');
 require('dotenv').config();
-
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
-});
 
 async function migrate() {
     try {
         console.log('🔌 Connecting to database...');
-        const client = await pool.connect();
+        // Pool.query matches the shared config interface usually
+        const client = pool;
 
         console.log('🛠️ Creating contact_messages table...');
         const createTableQuery = `
@@ -45,7 +39,6 @@ async function migrate() {
             console.error('❌ Verification: Table NOT found after creation attempt.');
         }
 
-        client.release();
     } catch (err) {
         console.error('❌ Migration failed:', err);
     } finally {
