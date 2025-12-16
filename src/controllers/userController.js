@@ -1042,11 +1042,23 @@ id, title, subject, view_count, approval_status,
 
 async function updateMyProfile(req, res) {
   try {
+    const fs = require('fs');
+    const path = require('path');
+    const logPath = path.join(__dirname, '../../debug_log.txt');
+    const logData = `[${new Date().toISOString()}] updateMyProfile called. User: ${req.user.id}. Body: ${JSON.stringify(req.body)}\n`;
+    fs.appendFileSync(logPath, logData);
+
     const user = await updateUserProfile(req.user.id, req.body);
     res.json({ message: "Profile updated", user });
   } catch (err) {
+    const fs = require('fs');
+    const path = require('path');
+    const logPath = path.join(__dirname, '../../debug_log.txt');
+    const logData = `[${new Date().toISOString()}] ERROR in updateMyProfile: ${err.message}\nStack: ${err.stack}\n`;
+    fs.appendFileSync(logPath, logData);
+
     console.error("Error updating profile:", err);
-    res.status(500).json({ error: "Failed to update profile" });
+    res.status(500).json({ error: "Failed to update profile", details: err.message });
   }
 }
 
