@@ -195,8 +195,7 @@ async function handleMultiUpload(req, res) {
           startStatus = approval_status;
         }
 
-        const createdNotes = [];
-        const errors = [];
+
 
         for (let i = 0; i < req.files.length; i++) {
           const f = req.files[i];
@@ -1515,5 +1514,9 @@ async function handleMultiUpload(req, res) {
       reportNote,
       getDeleteRequests,
       reviewDeleteRequest,
-      uploadMiddleware // Exported for use in routes
+      uploadMiddleware
     };
+  } catch (e) {
+    console.error('SERVER INIT ERROR:', e);
+  }
+}
